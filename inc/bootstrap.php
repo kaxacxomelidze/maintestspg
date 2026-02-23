@@ -3,6 +3,20 @@ declare(strict_types=1);
 
 // IMPORTANT: no spaces/BOM before <?php
 
+
+if (!function_exists('str_contains')) {
+  function str_contains(string $haystack, string $needle): bool {
+    if ($needle === '') return true;
+    return strpos($haystack, $needle) !== false;
+  }
+}
+if (!function_exists('str_starts_with')) {
+  function str_starts_with(string $haystack, string $needle): bool {
+    if ($needle === '') return true;
+    return strpos($haystack, $needle) === 0;
+  }
+}
+
 $config = require __DIR__ . '/config.php';
 
 /**
@@ -66,7 +80,7 @@ function csrf_token(): string {
   }
   return $_SESSION['_csrf'];
 }
-function csrf_verify(): void {
+function csrf_verify() {
   $ok = isset($_POST['_csrf'], $_SESSION['_csrf']) && hash_equals($_SESSION['_csrf'], (string)$_POST['_csrf']);
   if (!$ok) {
     http_response_code(419);
@@ -81,7 +95,83 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
     exit("Headers already sent in: {$file} on line {$line}. Make sure every page loads bootstrap.php BEFORE header.php.");
   }
   session_name($config['app']['session_name'] ?? 'SPGSESSID');
+  $secureCookie = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+  if (PHP_VERSION_ID >= 70300) {
+    session_set_cookie_params([
+      'lifetime' => 0,
+      'path' => '/',
+      'domain' => '',
+      'secure' => $secureCookie,
+      'httponly' => true,
+      'samesite' => 'Lax',
+    ]);
+  } else {
+    // PHP < 7.3 has no array options support for SameSite.
+    session_set_cookie_params(0, '/; samesite=Lax', '', $secureCookie, true);
+  }
   session_start();
+}
+
+
+function fallback_sqlite_pdo(): PDO {
+  static $sqlite = null;
+  if ($sqlite instanceof PDO) return $sqlite;
+
+  $candidates = [
+    __DIR__ . '/../var/spg_fallback.sqlite',
+    sys_get_temp_dir() . '/spg_fallback.sqlite',
+  ];
+
+  $lastEx = null;
+  foreach ($candidates as $dbFile) {
+    try {
+      $dir = dirname($dbFile);
+      if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+      }
+      $sqlite = new PDO('sqlite:' . $dbFile, null, null, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+      ]);
+      break;
+    } catch (Throwable $e) {
+      $lastEx = $e;
+      $sqlite = null;
+    }
+  }
+
+  if (!$sqlite instanceof PDO) {
+    // last-resort runtime fallback to keep site alive even on read-only hosting
+    $sqlite = new PDO('sqlite::memory:', null, null, [
+      PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+      PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ]);
+  }
+
+  $schema = [
+    "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS admin_permissions (admin_id INTEGER NOT NULL, permission TEXT NOT NULL, PRIMARY KEY (admin_id, permission))",
+    "CREATE TABLE IF NOT EXISTS news_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, title TEXT NOT NULL, excerpt TEXT NOT NULL, content TEXT, image_path TEXT NOT NULL, published_at TEXT NOT NULL, is_published INTEGER NOT NULL DEFAULT 1)",
+    "CREATE TABLE IF NOT EXISTS news_gallery (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, image_path TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, full_name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, lecturer_name TEXT, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS contact_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL, phone TEXT, message TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS membership_applications (id INTEGER PRIMARY KEY AUTOINCREMENT, first_name TEXT NOT NULL, last_name TEXT NOT NULL, personal_id TEXT NOT NULL, phone TEXT NOT NULL, university TEXT NOT NULL, faculty TEXT NOT NULL, email TEXT, additional_info TEXT, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS people_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, page_key TEXT NOT NULL, first_name TEXT NOT NULL, last_name TEXT NOT NULL, role_title TEXT, image_path TEXT, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_courses (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_title TEXT NOT NULL, instructor TEXT, schedule_text TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, task_title TEXT NOT NULL, due_at TEXT, status TEXT NOT NULL DEFAULT 'todo', created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, message TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', is_read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_lecturers (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, lecturer_name TEXT NOT NULL, department TEXT, email TEXT, office_room TEXT, office_hours TEXT, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS admin_login_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, admin_id INTEGER, ip_address TEXT, user_agent TEXT, status TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL)",
+  ];
+  foreach ($schema as $sql) {
+    $sqlite->exec($sql);
+  }
+
+  $adminHash = '$2y$12$AwUYItlTmRoVCl7jWc/u1exQOUM0VoCO6K8jgHP3AlR3OkcM5YKnO';
+  $stmt = $sqlite->prepare('INSERT OR IGNORE INTO admins (id, username, password_hash, created_at) VALUES (1, ?, ?, ?)');
+  $stmt->execute(['admin', $adminHash, date('Y-m-d H:i:s')]);
+
+  return $sqlite;
 }
 
 /** DB */
@@ -91,27 +181,49 @@ function db(): PDO {
 
   $cfg = require __DIR__ . '/config.php';
   $db = $cfg['db'];
-
-  $dsn = "mysql:host={$db['host']};dbname={$db['name']};charset={$db['charset']}";
-  $pdo = new PDO($dsn, $db['user'], $db['pass'], [
+  $options = [
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-  ]);
-  return $pdo;
+  ];
+
+  $dsn = "mysql:host={$db['host']};dbname={$db['name']};charset={$db['charset']}";
+  try {
+    $pdo = new PDO($dsn, $db['user'], $db['pass'], $options);
+    return $pdo;
+  } catch (PDOException $e) {
+    $msg = (string)$e->getMessage();
+    $isUnknownDb = str_contains($msg, '1049') || stripos($msg, 'Unknown database') !== false;
+    if ($isUnknownDb) {
+      try {
+        $serverDsn = "mysql:host={$db['host']};charset={$db['charset']}";
+        $serverPdo = new PDO($serverDsn, $db['user'], $db['pass'], $options);
+        $dbName = str_replace('`', '', (string)$db['name']);
+        $charset = (string)$db['charset'];
+        $serverPdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET {$charset}");
+        $pdo = new PDO($dsn, $db['user'], $db['pass'], $options);
+        return $pdo;
+      } catch (Throwable $e2) {
+        // fallback to sqlite below
+      }
+    }
+
+    $pdo = fallback_sqlite_pdo();
+    return $pdo;
+  }
 }
 
 /** Admin auth */
 function is_admin(): bool {
   return !empty($_SESSION['admin_id']);
 }
-function require_admin(): void {
+function require_admin() {
   if (!is_admin()) {
     header('Location: ' . url('admin/login.php'));
     exit;
   }
 }
 
-function ensure_admin_permissions_table(): void {
+function ensure_admin_permissions_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -126,7 +238,30 @@ function ensure_admin_permissions_table(): void {
   }
 }
 
-function ensure_news_gallery_table(): void {
+
+function ensure_news_posts_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS news_posts (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      category VARCHAR(120) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      excerpt TEXT NOT NULL,
+      content LONGTEXT DEFAULT NULL,
+      image_path VARCHAR(255) NOT NULL,
+      published_at DATETIME NOT NULL,
+      is_published TINYINT(1) NOT NULL DEFAULT 1,
+      INDEX idx_news_posts_published_at (published_at),
+      INDEX idx_news_posts_is_published (is_published)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB user lacks permissions
+  }
+}
+
+function ensure_news_gallery_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -151,6 +286,9 @@ function available_admin_permissions(): array {
     'news.delete' => 'Delete news',
     'people.manage' => 'Manage team members',
     'contact.view' => 'View contact submissions',
+    'membership.view' => 'View membership applications',
+    'university.manage' => 'Manage university system data',
+    'admin.logs.view' => 'View admin login logs',
     'admins.manage' => 'Manage admins',
   ];
 }
@@ -187,10 +325,322 @@ function has_permission(string $perm): bool {
   return in_array($perm, $perms, true);
 }
 
-function require_permission(string $perm): void {
+function require_permission(string $perm) {
   if (!has_permission($perm)) {
     http_response_code(403);
     exit('Access denied');
+  }
+}
+
+
+
+function ensure_admin_login_logs_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS admin_login_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(120) NOT NULL,
+      admin_id INT DEFAULT NULL,
+      ip_address VARCHAR(64) DEFAULT NULL,
+      user_agent VARCHAR(255) DEFAULT NULL,
+      status VARCHAR(24) NOT NULL,
+      reason VARCHAR(190) DEFAULT NULL,
+      created_at DATETIME NOT NULL,
+      INDEX idx_admin_login_logs_created_at (created_at),
+      INDEX idx_admin_login_logs_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+function record_admin_login_log(string $username, $adminId, string $status, string $reason = '') {
+  ensure_admin_login_logs_table();
+  $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+  $ua = substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
+  try {
+    $stmt = db()->prepare('INSERT INTO admin_login_logs (username, admin_id, ip_address, user_agent, status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    $stmt->execute([
+      $username,
+      $adminId,
+      $ip !== '' ? $ip : null,
+      $ua !== '' ? $ua : null,
+      $status,
+      $reason !== '' ? $reason : null,
+      date('Y-m-d H:i:s')
+    ]);
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+function ensure_users_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      full_name VARCHAR(190) NOT NULL,
+      email VARCHAR(190) NOT NULL UNIQUE,
+      lecturer_name VARCHAR(190) DEFAULT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at DATETIME NOT NULL,
+      INDEX (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    try {
+      db()->exec("ALTER TABLE users ADD COLUMN lecturer_name VARCHAR(190) DEFAULT NULL AFTER email");
+    } catch (Throwable $e2) {
+      // already exists
+    }
+    try {
+      db()->exec("ALTER TABLE users ADD INDEX idx_users_lecturer_name (lecturer_name)");
+    } catch (Throwable $e3) {
+      // already exists
+    }
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+function is_user_logged_in(): bool {
+  return !empty($_SESSION['user_id']);
+}
+
+function user_login_allowed(): bool {
+  $lockUntil = (int)($_SESSION['user_login_lock_until'] ?? 0);
+  return $lockUntil <= time();
+}
+
+function user_login_lock_remaining(): int {
+  $lockUntil = (int)($_SESSION['user_login_lock_until'] ?? 0);
+  return max(0, $lockUntil - time());
+}
+
+function user_login_register_failure() {
+  $fails = (int)($_SESSION['user_login_failures'] ?? 0) + 1;
+  $_SESSION['user_login_failures'] = $fails;
+  if ($fails >= 5) {
+    $_SESSION['user_login_lock_until'] = time() + 300;
+    $_SESSION['user_login_failures'] = 0;
+  }
+}
+
+function user_login_register_success() {
+  unset($_SESSION['user_login_failures'], $_SESSION['user_login_lock_until']);
+}
+
+function strong_password(string $password): bool {
+  if (strlen($password) < 8) return false;
+  if (!preg_match('/[A-Z]/', $password)) return false;
+  if (!preg_match('/[a-z]/', $password)) return false;
+  if (!preg_match('/\d/', $password)) return false;
+  return true;
+}
+
+function current_user() {
+  if (!is_user_logged_in()) return null;
+  return [
+    'id' => (int)($_SESSION['user_id'] ?? 0),
+    'name' => (string)($_SESSION['user_name'] ?? ''),
+    'email' => (string)($_SESSION['user_email'] ?? ''),
+    'lecturer_name' => (string)($_SESSION['user_lecturer_name'] ?? ''),
+  ];
+}
+
+function ensure_user_courses_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS user_courses (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      course_title VARCHAR(190) NOT NULL,
+      instructor VARCHAR(190) DEFAULT NULL,
+      schedule_text VARCHAR(190) DEFAULT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'active',
+      created_at DATETIME NOT NULL,
+      INDEX idx_user_courses_user_id (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+function ensure_user_tasks_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS user_tasks (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      task_title VARCHAR(190) NOT NULL,
+      due_at DATETIME DEFAULT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'todo',
+      created_at DATETIME NOT NULL,
+      INDEX idx_user_tasks_user_id (user_id),
+      INDEX idx_user_tasks_due_at (due_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+function ensure_user_notifications_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS user_notifications (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      message VARCHAR(255) NOT NULL,
+      level VARCHAR(32) NOT NULL DEFAULT 'info',
+      is_read TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL,
+      INDEX idx_user_notifications_user_id (user_id),
+      INDEX idx_user_notifications_is_read (is_read)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+
+function ensure_user_lecturers_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS user_lecturers (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      lecturer_name VARCHAR(190) NOT NULL,
+      department VARCHAR(190) DEFAULT NULL,
+      email VARCHAR(190) DEFAULT NULL,
+      office_room VARCHAR(64) DEFAULT NULL,
+      office_hours VARCHAR(190) DEFAULT NULL,
+      created_at DATETIME NOT NULL,
+      INDEX idx_user_lecturers_user_id (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+function seed_user_dashboard_data($userId) {
+  ensure_user_courses_table();
+  ensure_user_tasks_table();
+  ensure_user_notifications_table();
+  ensure_user_lecturers_table();
+  try {
+    $stmt = db()->prepare('SELECT COUNT(*) FROM user_courses WHERE user_id=?');
+    $stmt->execute([$userId]);
+    $hasCourses = (int)$stmt->fetchColumn() > 0;
+    if (!$hasCourses) {
+      $now = date('Y-m-d H:i:s');
+      $courseStmt = db()->prepare('INSERT INTO user_courses (user_id, course_title, instructor, schedule_text, status, created_at) VALUES (?, ?, ?, ?, ?, ?)');
+      $courseStmt->execute([$userId, 'Academic Writing', 'Prof. N. Beridze', 'Mon / Wed 10:00', 'active', $now]);
+      $courseStmt->execute([$userId, 'Computer Science Basics', 'Prof. G. Gogelia', 'Tue / Thu 13:00', 'active', $now]);
+
+      $taskStmt = db()->prepare('INSERT INTO user_tasks (user_id, task_title, due_at, status, created_at) VALUES (?, ?, ?, ?, ?)');
+      $taskStmt->execute([$userId, 'Submit assignment #2', date('Y-m-d H:i:s', strtotime('+4 days')), 'todo', $now]);
+      $taskStmt->execute([$userId, 'Prepare lab report', date('Y-m-d H:i:s', strtotime('+7 days')), 'todo', $now]);
+
+      $notifStmt = db()->prepare('INSERT INTO user_notifications (user_id, message, level, is_read, created_at) VALUES (?, ?, ?, 0, ?)');
+      $notifStmt->execute([$userId, 'Welcome to the secure student dashboard.', 'success', $now]);
+      $notifStmt->execute([$userId, 'Remember to complete your profile information.', 'info', $now]);
+
+      $lecturerStmt = db()->prepare('INSERT INTO user_lecturers (user_id, lecturer_name, department, email, office_room, office_hours, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      $lecturerStmt->execute([$userId, 'Prof. N. Beridze', 'Humanities', 'n.beridze@spg.local', 'B-204', 'Mon 12:00-14:00', $now]);
+      $lecturerStmt->execute([$userId, 'Assoc. Prof. G. Gogelia', 'Computer Science', 'g.gogelia@spg.local', 'C-310', 'Thu 11:00-13:00', $now]);
+    }
+  } catch (Throwable $e) {
+    // ignore if DB is unavailable
+  }
+}
+
+function get_user_courses(int $userId): array {
+  ensure_user_courses_table();
+  try {
+    $stmt = db()->prepare('SELECT course_title, instructor, schedule_text, status FROM user_courses WHERE user_id=? ORDER BY id DESC');
+    $stmt->execute([$userId]);
+    return $stmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+function get_user_tasks(int $userId): array {
+  ensure_user_tasks_table();
+  try {
+    $stmt = db()->prepare('SELECT task_title, due_at, status FROM user_tasks WHERE user_id=? ORDER BY (due_at IS NULL), due_at ASC, id DESC');
+    $stmt->execute([$userId]);
+    return $stmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+function get_user_notifications(int $userId): array {
+  ensure_user_notifications_table();
+  try {
+    $stmt = db()->prepare('SELECT id, message, level, is_read, created_at FROM user_notifications WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 8');
+    $stmt->execute([$userId]);
+    return $stmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+
+function get_user_lecturers(int $userId): array {
+  ensure_user_lecturers_table();
+  try {
+    $stmt = db()->prepare('SELECT lecturer_name, department, email, office_room, office_hours FROM user_lecturers WHERE user_id=? ORDER BY id DESC');
+    $stmt->execute([$userId]);
+    return $stmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+
+
+function normalize_lecturer_name(string $name): string {
+  $name = trim(preg_replace('/\s+/', ' ', $name) ?? '');
+  return mb_substr($name, 0, 190);
+}
+
+function list_available_lecturers(): array {
+  ensure_user_lecturers_table();
+  try {
+    $rows = db()->query("SELECT DISTINCT lecturer_name FROM user_lecturers WHERE lecturer_name<>'' ORDER BY lecturer_name ASC")->fetchAll();
+    $out = [];
+    foreach ($rows as $r) {
+      $name = trim((string)($r['lecturer_name'] ?? ''));
+      if ($name !== '') $out[] = $name;
+    }
+    return array_values($out);
+  } catch (Throwable $e) {
+    return [];
+  }
+}
+
+function get_lecturer_students(string $lecturerName): array {
+  ensure_users_table();
+  $lecturerName = trim($lecturerName);
+  if ($lecturerName === '') return [];
+  try {
+    $stmt = db()->prepare('SELECT id, full_name, email, created_at FROM users WHERE lecturer_name=? ORDER BY full_name ASC, id DESC');
+    $stmt->execute([$lecturerName]);
+    return $stmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
   }
 }
 
@@ -201,17 +651,21 @@ function fmt_date_dmY(string $datetime): string {
 }
 
 function get_news_posts(int $limit = 50): array {
-  $stmt = db()->prepare("
+  try {
+    $stmt = db()->prepare("
     SELECT id, category, title, excerpt, image_path, published_at
     FROM news_posts
     WHERE is_published=1
     ORDER BY published_at DESC, id DESC
     LIMIT :lim
   ");
-  $stmt->bindValue(':lim', $limit, PDO::PARAM_INT);
-  $stmt->execute();
+    $stmt->bindValue(':lim', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+  } catch (Throwable $e) {
+    return [];
+  }
 
-  $rows = $stmt->fetchAll();
   $out = [];
   foreach ($rows as $r) {
     $out[] = [
@@ -226,10 +680,14 @@ function get_news_posts(int $limit = 50): array {
   return $out;
 }
 
-function get_one_news(int $id): ?array {
-  $stmt = db()->prepare("SELECT * FROM news_posts WHERE id=? AND is_published=1 LIMIT 1");
-  $stmt->execute([$id]);
-  $r = $stmt->fetch();
+function get_one_news(int $id) {
+  try {
+    $stmt = db()->prepare("SELECT * FROM news_posts WHERE id=? AND is_published=1 LIMIT 1");
+    $stmt->execute([$id]);
+    $r = $stmt->fetch();
+  } catch (Throwable $e) {
+    return null;
+  }
   if (!$r) return null;
 
   return [
@@ -264,7 +722,7 @@ function get_news_gallery(int $postId): array {
   return $out;
 }
 
-function ensure_contact_messages_table(): void {
+function ensure_contact_messages_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -283,7 +741,30 @@ function ensure_contact_messages_table(): void {
   }
 }
 
-function ensure_people_profiles_table(): void {
+function ensure_membership_applications_table() {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS membership_applications (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      first_name VARCHAR(120) NOT NULL,
+      last_name VARCHAR(120) NOT NULL,
+      personal_id VARCHAR(30) NOT NULL,
+      phone VARCHAR(50) NOT NULL,
+      university VARCHAR(190) NOT NULL,
+      faculty VARCHAR(190) NOT NULL,
+      email VARCHAR(190) DEFAULT NULL,
+      additional_info TEXT DEFAULT NULL,
+      created_at DATETIME NOT NULL,
+      INDEX (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB user lacks permissions
+  }
+}
+
+function ensure_people_profiles_table() {
   static $done = false;
   if ($done) return;
   $done = true;
