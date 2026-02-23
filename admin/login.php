@@ -39,21 +39,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $error = 'Captcha is incorrect';
       record_admin_login_log($username, null, 'failed', 'captcha incorrect');
     } else {
-      $stmt = db()->prepare('SELECT id, password_hash FROM admins WHERE username=? LIMIT 1');
-      $stmt->execute([$username]);
-      $admin = $stmt->fetch();
-      if ($admin && password_verify($password, (string)$admin['password_hash'])) {
-        session_regenerate_id(true);
-        $_SESSION['admin_id'] = (int)$admin['id'];
-        $_SESSION['admin_username'] = $username;
-        $_SESSION['login_attempts'] = 0;
-        $_SESSION['login_locked_until'] = 0;
-        record_admin_login_log($username, (int)$admin['id'], 'success', 'login successful');
-        header('Location: ' . url('admin/news/index.php'));
-        exit;
+      try {
+        $stmt = db()->prepare('SELECT id, password_hash FROM admins WHERE username=? LIMIT 1');
+        $stmt->execute([$username]);
+        $admin = $stmt->fetch();
+        if ($admin && password_verify($password, (string)$admin['password_hash'])) {
+          session_regenerate_id(true);
+          $_SESSION['admin_id'] = (int)$admin['id'];
+          $_SESSION['admin_username'] = $username;
+          $_SESSION['login_attempts'] = 0;
+          $_SESSION['login_locked_until'] = 0;
+          record_admin_login_log($username, (int)$admin['id'], 'success', 'login successful');
+          header('Location: ' . url('admin/news/index.php'));
+          exit;
+        }
+        $error = 'Wrong username or password';
+        record_admin_login_log($username, null, 'failed', 'wrong credentials');
+      } catch (Throwable $e) {
+        $error = 'Temporary server/database error. Please try again.';
+        record_admin_login_log($username, null, 'failed', 'db unavailable');
       }
-      $error = 'Wrong username or password';
-      record_admin_login_log($username, null, 'failed', 'wrong credentials');
     }
   }
   if ($error !== '') {

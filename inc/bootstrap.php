@@ -96,14 +96,19 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
   }
   session_name($config['app']['session_name'] ?? 'SPGSESSID');
   $secureCookie = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
-  session_set_cookie_params([
-    'lifetime' => 0,
-    'path' => '/',
-    'domain' => '',
-    'secure' => $secureCookie,
-    'httponly' => true,
-    'samesite' => 'Lax',
-  ]);
+  if (PHP_VERSION_ID >= 70300) {
+    session_set_cookie_params([
+      'lifetime' => 0,
+      'path' => '/',
+      'domain' => '',
+      'secure' => $secureCookie,
+      'httponly' => true,
+      'samesite' => 'Lax',
+    ]);
+  } else {
+    // PHP < 7.3 has no array options support for SameSite.
+    session_set_cookie_params(0, '/; samesite=Lax', '', $secureCookie, true);
+  }
   session_start();
 }
 
