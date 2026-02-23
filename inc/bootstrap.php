@@ -107,6 +107,48 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
   session_start();
 }
 
+
+function fallback_sqlite_pdo(): PDO {
+  static $sqlite = null;
+  if ($sqlite instanceof PDO) return $sqlite;
+
+  $dbFile = __DIR__ . '/../var/spg_fallback.sqlite';
+  $dir = dirname($dbFile);
+  if (!is_dir($dir)) {
+    @mkdir($dir, 0777, true);
+  }
+
+  $sqlite = new PDO('sqlite:' . $dbFile, null, null, [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+  ]);
+
+  $schema = [
+    "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS admin_permissions (admin_id INTEGER NOT NULL, permission TEXT NOT NULL, PRIMARY KEY (admin_id, permission))",
+    "CREATE TABLE IF NOT EXISTS news_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, title TEXT NOT NULL, excerpt TEXT NOT NULL, content TEXT, image_path TEXT NOT NULL, published_at TEXT NOT NULL, is_published INTEGER NOT NULL DEFAULT 1)",
+    "CREATE TABLE IF NOT EXISTS news_gallery (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, image_path TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, full_name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, lecturer_name TEXT, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS contact_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL, phone TEXT, message TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS membership_applications (id INTEGER PRIMARY KEY AUTOINCREMENT, first_name TEXT NOT NULL, last_name TEXT NOT NULL, personal_id TEXT NOT NULL, phone TEXT NOT NULL, university TEXT NOT NULL, faculty TEXT NOT NULL, email TEXT, additional_info TEXT, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS people_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, page_key TEXT NOT NULL, first_name TEXT NOT NULL, last_name TEXT NOT NULL, role_title TEXT, image_path TEXT, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_courses (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_title TEXT NOT NULL, instructor TEXT, schedule_text TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, task_title TEXT NOT NULL, due_at TEXT, status TEXT NOT NULL DEFAULT 'todo', created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, message TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', is_read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS user_lecturers (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, lecturer_name TEXT NOT NULL, department TEXT, email TEXT, office_room TEXT, office_hours TEXT, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS admin_login_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, admin_id INTEGER, ip_address TEXT, user_agent TEXT, status TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL)",
+  ];
+  foreach ($schema as $sql) {
+    $sqlite->exec($sql);
+  }
+
+  $adminHash = '$2y$12$AwUYItlTmRoVCl7jWc/u1exQOUM0VoCO6K8jgHP3AlR3OkcM5YKnO';
+  $stmt = $sqlite->prepare('INSERT OR IGNORE INTO admins (id, username, password_hash, created_at) VALUES (1, ?, ?, ?)');
+  $stmt->execute(['admin', $adminHash, date('Y-m-d H:i:s')]);
+
+  return $sqlite;
+}
+
 /** DB */
 function db(): PDO {
   static $pdo = null;
@@ -126,17 +168,21 @@ function db(): PDO {
   } catch (PDOException $e) {
     $msg = (string)$e->getMessage();
     $isUnknownDb = str_contains($msg, '1049') || stripos($msg, 'Unknown database') !== false;
-    if (!$isUnknownDb) {
-      throw $e;
+    if ($isUnknownDb) {
+      try {
+        $serverDsn = "mysql:host={$db['host']};charset={$db['charset']}";
+        $serverPdo = new PDO($serverDsn, $db['user'], $db['pass'], $options);
+        $dbName = str_replace('`', '', (string)$db['name']);
+        $charset = (string)$db['charset'];
+        $serverPdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET {$charset}");
+        $pdo = new PDO($dsn, $db['user'], $db['pass'], $options);
+        return $pdo;
+      } catch (Throwable $e2) {
+        // fallback to sqlite below
+      }
     }
 
-    $serverDsn = "mysql:host={$db['host']};charset={$db['charset']}";
-    $serverPdo = new PDO($serverDsn, $db['user'], $db['pass'], $options);
-    $dbName = str_replace('`', '', (string)$db['name']);
-    $charset = (string)$db['charset'];
-    $serverPdo->exec("CREATE DATABASE IF NOT EXISTS `{$dbName}` CHARACTER SET {$charset}");
-
-    $pdo = new PDO($dsn, $db['user'], $db['pass'], $options);
+    $pdo = fallback_sqlite_pdo();
     return $pdo;
   }
 }
