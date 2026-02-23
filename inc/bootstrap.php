@@ -167,6 +167,29 @@ function ensure_admin_permissions_table(): void {
   }
 }
 
+
+function ensure_news_posts_table(): void {
+  static $done = false;
+  if ($done) return;
+  $done = true;
+  try {
+    db()->exec("CREATE TABLE IF NOT EXISTS news_posts (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      category VARCHAR(120) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      excerpt TEXT NOT NULL,
+      content LONGTEXT DEFAULT NULL,
+      image_path VARCHAR(255) NOT NULL,
+      published_at DATETIME NOT NULL,
+      is_published TINYINT(1) NOT NULL DEFAULT 1,
+      INDEX idx_news_posts_published_at (published_at),
+      INDEX idx_news_posts_is_published (is_published)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  } catch (Throwable $e) {
+    // ignore if DB user lacks permissions
+  }
+}
+
 function ensure_news_gallery_table(): void {
   static $done = false;
   if ($done) return;
@@ -526,7 +549,12 @@ function list_available_lecturers(): array {
   ensure_user_lecturers_table();
   try {
     $rows = db()->query("SELECT DISTINCT lecturer_name FROM user_lecturers WHERE lecturer_name<>'' ORDER BY lecturer_name ASC")->fetchAll();
-    return array_values(array_filter(array_map(fn($r) => trim((string)($r['lecturer_name'] ?? '')), $rows)));
+    $out = [];
+    foreach ($rows as $r) {
+      $name = trim((string)($r['lecturer_name'] ?? ''));
+      if ($name !== '') $out[] = $name;
+    }
+    return array_values($out);
   } catch (Throwable $e) {
     return [];
   }

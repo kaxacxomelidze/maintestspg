@@ -244,7 +244,8 @@ foreach ($rows as $r) {
 
     <div class="grid-3">
       <div class="admin-card"><label>Total team members</label><div style="font-size:30px;font-weight:900"><?= count($rows) ?></div></div>
-      <div class="admin-card"><label>Pages covered</label><div style="font-size:30px;font-weight:900;color:#93c5fd"><?= count(array_filter($pageTotals, fn($n)=>$n>0)) ?></div></div>
+      <?php $coveredPages = 0; foreach($pageTotals as $n){ if($n>0) $coveredPages++; } ?>
+      <div class="admin-card"><label>Pages covered</label><div style="font-size:30px;font-weight:900;color:#93c5fd"><?= $coveredPages ?></div></div>
       <div class="admin-card"><label>Largest section</label><div style="font-size:15px;font-weight:700;color:#cbd5e1"><?php $mx=0;$mk='—'; foreach($pageTotals as $k=>$n){ if($n>$mx){$mx=$n;$mk=$pageLabels[$k];}} echo h((string)$mk); ?></div></div>
     </div>
 
