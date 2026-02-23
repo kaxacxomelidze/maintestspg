@@ -112,16 +112,36 @@ function fallback_sqlite_pdo(): PDO {
   static $sqlite = null;
   if ($sqlite instanceof PDO) return $sqlite;
 
-  $dbFile = __DIR__ . '/../var/spg_fallback.sqlite';
-  $dir = dirname($dbFile);
-  if (!is_dir($dir)) {
-    @mkdir($dir, 0777, true);
+  $candidates = [
+    __DIR__ . '/../var/spg_fallback.sqlite',
+    sys_get_temp_dir() . '/spg_fallback.sqlite',
+  ];
+
+  $lastEx = null;
+  foreach ($candidates as $dbFile) {
+    try {
+      $dir = dirname($dbFile);
+      if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+      }
+      $sqlite = new PDO('sqlite:' . $dbFile, null, null, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+      ]);
+      break;
+    } catch (Throwable $e) {
+      $lastEx = $e;
+      $sqlite = null;
+    }
   }
 
-  $sqlite = new PDO('sqlite:' . $dbFile, null, null, [
-    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-  ]);
+  if (!$sqlite instanceof PDO) {
+    // last-resort runtime fallback to keep site alive even on read-only hosting
+    $sqlite = new PDO('sqlite::memory:', null, null, [
+      PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+      PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ]);
+  }
 
   $schema = [
     "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TEXT)",
