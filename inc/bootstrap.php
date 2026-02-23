@@ -80,7 +80,7 @@ function csrf_token(): string {
   }
   return $_SESSION['_csrf'];
 }
-function csrf_verify(): void {
+function csrf_verify() {
   $ok = isset($_POST['_csrf'], $_SESSION['_csrf']) && hash_equals($_SESSION['_csrf'], (string)$_POST['_csrf']);
   if (!$ok) {
     http_response_code(419);
@@ -211,14 +211,14 @@ function db(): PDO {
 function is_admin(): bool {
   return !empty($_SESSION['admin_id']);
 }
-function require_admin(): void {
+function require_admin() {
   if (!is_admin()) {
     header('Location: ' . url('admin/login.php'));
     exit;
   }
 }
 
-function ensure_admin_permissions_table(): void {
+function ensure_admin_permissions_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -234,7 +234,7 @@ function ensure_admin_permissions_table(): void {
 }
 
 
-function ensure_news_posts_table(): void {
+function ensure_news_posts_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -256,7 +256,7 @@ function ensure_news_posts_table(): void {
   }
 }
 
-function ensure_news_gallery_table(): void {
+function ensure_news_gallery_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -320,7 +320,7 @@ function has_permission(string $perm): bool {
   return in_array($perm, $perms, true);
 }
 
-function require_permission(string $perm): void {
+function require_permission(string $perm) {
   if (!has_permission($perm)) {
     http_response_code(403);
     exit('Access denied');
@@ -329,7 +329,7 @@ function require_permission(string $perm): void {
 
 
 
-function ensure_admin_login_logs_table(): void {
+function ensure_admin_login_logs_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -351,7 +351,7 @@ function ensure_admin_login_logs_table(): void {
   }
 }
 
-function record_admin_login_log(string $username, ?int $adminId, string $status, string $reason = ''): void {
+function record_admin_login_log(string $username, $adminId, string $status, string $reason = '') {
   ensure_admin_login_logs_table();
   $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
   $ua = substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
@@ -371,7 +371,7 @@ function record_admin_login_log(string $username, ?int $adminId, string $status,
   }
 }
 
-function ensure_users_table(): void {
+function ensure_users_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -414,7 +414,7 @@ function user_login_lock_remaining(): int {
   return max(0, $lockUntil - time());
 }
 
-function user_login_register_failure(): void {
+function user_login_register_failure() {
   $fails = (int)($_SESSION['user_login_failures'] ?? 0) + 1;
   $_SESSION['user_login_failures'] = $fails;
   if ($fails >= 5) {
@@ -423,7 +423,7 @@ function user_login_register_failure(): void {
   }
 }
 
-function user_login_register_success(): void {
+function user_login_register_success() {
   unset($_SESSION['user_login_failures'], $_SESSION['user_login_lock_until']);
 }
 
@@ -435,7 +435,7 @@ function strong_password(string $password): bool {
   return true;
 }
 
-function current_user(): ?array {
+function current_user() {
   if (!is_user_logged_in()) return null;
   return [
     'id' => (int)($_SESSION['user_id'] ?? 0),
@@ -445,7 +445,7 @@ function current_user(): ?array {
   ];
 }
 
-function ensure_user_courses_table(): void {
+function ensure_user_courses_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -465,7 +465,7 @@ function ensure_user_courses_table(): void {
   }
 }
 
-function ensure_user_tasks_table(): void {
+function ensure_user_tasks_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -485,7 +485,7 @@ function ensure_user_tasks_table(): void {
   }
 }
 
-function ensure_user_notifications_table(): void {
+function ensure_user_notifications_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -506,7 +506,7 @@ function ensure_user_notifications_table(): void {
 }
 
 
-function ensure_user_lecturers_table(): void {
+function ensure_user_lecturers_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -527,7 +527,7 @@ function ensure_user_lecturers_table(): void {
   }
 }
 
-function seed_user_dashboard_data(int $userId): void {
+function seed_user_dashboard_data($userId) {
   ensure_user_courses_table();
   ensure_user_tasks_table();
   ensure_user_notifications_table();
@@ -675,7 +675,7 @@ function get_news_posts(int $limit = 50): array {
   return $out;
 }
 
-function get_one_news(int $id): ?array {
+function get_one_news(int $id) {
   try {
     $stmt = db()->prepare("SELECT * FROM news_posts WHERE id=? AND is_published=1 LIMIT 1");
     $stmt->execute([$id]);
@@ -717,7 +717,7 @@ function get_news_gallery(int $postId): array {
   return $out;
 }
 
-function ensure_contact_messages_table(): void {
+function ensure_contact_messages_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -736,7 +736,7 @@ function ensure_contact_messages_table(): void {
   }
 }
 
-function ensure_membership_applications_table(): void {
+function ensure_membership_applications_table() {
   static $done = false;
   if ($done) return;
   $done = true;
@@ -759,7 +759,7 @@ function ensure_membership_applications_table(): void {
   }
 }
 
-function ensure_people_profiles_table(): void {
+function ensure_people_profiles_table() {
   static $done = false;
   if ($done) return;
   $done = true;
